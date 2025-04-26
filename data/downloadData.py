@@ -1,29 +1,58 @@
 import os
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
+import shutil
+import random
+from torchvision.datasets import OxfordIIITPet
+from config import Config
 
-DATA_DIR = "./data"
-TRAIN_DIR = os.path.join(DATA_DIR, "train")
-TEST_DIR = os.path.join(DATA_DIR, "test")
+def download_and_prepare_data():
+    """Downloads Oxford-IIIT Pets dataset and splits into train, val, and test folders."""
+    dataset = OxfordIIITPet(root=Config.DATA_DIR, split="trainval", download=True)
 
-def download_data():
-    """Downloads Oxford-IIIT Pets dataset if not already present."""
-    if not os.path.exists(DATA_DIR):
-        print(f"Creating {DATA_DIR} and downloading dataset...")
-        os.makedirs(DATA_DIR, exist_ok=True)
+    # Paths
+    images_dir = os.path.join(Config.DATA_DIR, "oxford-iiit-pet", "images")
+    train_dir = os.path.join(Config.DATA_DIR, "train")
+    val_dir = os.path.join(Config.DATA_DIR, "val")
+    test_dir = os.path.join(Config.DATA_DIR, "test")
 
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
+    for folder in [train_dir, val_dir, test_dir]:
+        os.makedirs(folder, exist_ok=True)
 
-        datasets.OxfordIIITPet(root=DATA_DIR, split="trainval", download=True, transform=transform)
-        datasets.OxfordIIITPet(root=DATA_DIR, split="test", download=True, transform=transform)
+    # Get class names
+    class_names = dataset.classes
 
-        print(f"Dataset saved in {DATA_DIR}/train and {DATA_DIR}/test.")
-    else:
-        print("Data directory already exists. Skipping download.")
+    # Prepare (image_filename, class_name) list
+    data = []
+    for i in range(len(dataset)):
+        image_path, label = dataset._images[i], dataset[i][1]  # label is 0-based
+        class_name = class_names[label]
+        image_name = image_path.with_suffix('.jpg').name  # e.g., "Abyssinian_12.jpg"
+        data.append((image_name, class_name))
+
+    # Shuffle and split
+    random.shuffle(data)
+    total = len(data)
+    train_end = int(0.8 * total)
+    val_end = int(0.9 * total)
+
+    splits = {
+        train_dir: data[:train_end],
+        val_dir: data[train_end:val_end],
+        test_dir: data[val_end:]
+    }
+
+    # Copy images
+    for split_dir, split_data in splits.items():
+        for img_name, class_name in split_data:
+            src = os.path.join(images_dir, img_name)
+            dst_dir = os.path.join(split_dir, class_name)
+            os.makedirs(dst_dir, exist_ok=True)
+            shutil.copy(src, os.path.join(dst_dir, img_name))
+
+    shutil.move("data/oxford-iiit-pet/test", "data/test")
+    shutil.move("data/oxford-iiit-pet/train", "data/train")
+    shutil.move("data/oxford-iiit-pet/val", "data/val")
+    shutil.rmtree("data/oxford-iiit-pet")
+    print("✅ Dataset successfully split into train, val, and test folders.")
 
 if __name__ == "__main__":
-    download_data()
+    download_and_prepare_data()

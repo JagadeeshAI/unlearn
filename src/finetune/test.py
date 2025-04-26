@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 from transformers import ViTForImageClassification
 from config import Config
-from src.data import load_oxford_pets_dataset
+from src.finetune.data import prepare_data_loaders  # updated correctly!
 
 def evaluate_model():
     """Loads the trained ViT model and evaluates accuracy on Oxford-IIIT Pets Test set."""
@@ -21,7 +21,7 @@ def evaluate_model():
     print("🔍 Loading model...")
     model = ViTForImageClassification.from_pretrained(
         "google/vit-base-patch16-224",
-        num_labels=37,  # 37 classes
+        num_labels=37,  # Correct number of classes
         ignore_mismatched_sizes=True,
     )
     model.load_state_dict(torch.load(Config.MODEL_PATH, map_location=Config.DEVICE))
@@ -29,13 +29,14 @@ def evaluate_model():
     model.eval()
     print("✅ Model loaded successfully!")
 
-    # Load test data
-    _, _, test_loader = load_oxford_pets_dataset(
+    # Load test data using prepare_data_loaders properly
+    data = prepare_data_loaders(
         data_dir=Config.DATA_DIR,
         image_size=(224, 224),
         batch_size=Config.BATCH_SIZE,
         num_workers=2,
     )
+    test_loader = data['finetune']['test']  # ✅ Fetch from nested dictionary!
 
     class_correct = [0] * 37
     class_total = [0] * 37
@@ -60,15 +61,17 @@ def evaluate_model():
                     class_correct[label] += 1
                 class_total[label] += 1
 
-    accuracy = 100 * correct / total
-    print(f"\n✅ Overall Test Accuracy: {accuracy:.2f}%")
+    overall_accuracy = 100 * correct / total
+    print(f"\n✅ Overall Test Accuracy: {overall_accuracy:.2f}%")
 
     # Now calculate per-class accuracy
     print("\n📊 Per-Class Accuracy:")
-    test_results = {}
+    test_results = {
+        "overall_accuracy": overall_accuracy,
+        "per_class_accuracy": {}
+    }
 
-    # You can also map class indices to class names if available
-    class_names = test_loader.dataset.classes  # ImageFolder gives this automatically
+    class_names = test_loader.dataset.classes  # ✅ ImageFolder gives sorted class names
 
     for i in range(37):
         if class_total[i] > 0:
@@ -77,14 +80,14 @@ def evaluate_model():
             acc = 0.0
         class_name = class_names[i]
         print(f"  {class_name}: {acc:.2f}%")
-        test_results[class_name] = acc
+        test_results["per_class_accuracy"][class_name] = acc
 
     # Save per-class results to JSON
     result_path = os.path.join(Config.MODEL_DIR, "test_results.json")
     with open(result_path, "w") as f:
         json.dump(test_results, f, indent=4)
 
-    print(f"\n📝 Per-class accuracies saved to {result_path}")
+    print(f"\n📝 Test results saved to {result_path}")
 
 if __name__ == "__main__":
     evaluate_model()

@@ -12,9 +12,7 @@ from transformers import ViTForImageClassification
 from tqdm import tqdm
 
 from config import Config
-from src.data import load_oxford_pets_dataset
-
-
+from src.finetune.data import prepare_data_loaders  # updated import!
 
 def evaluate(model, data_loader):
     """Evaluates the model and returns accuracy."""
@@ -41,17 +39,21 @@ def train():
         "google/vit-base-patch16-224",
         num_labels=37,
         ignore_mismatched_sizes=True,
-        hidden_dropout_prob=0.2,      # Add dropout
-        attention_probs_dropout_prob=0.2,  # Add dropout in attention
+        hidden_dropout_prob=0.2,
+        attention_probs_dropout_prob=0.2,
     ).to(Config.DEVICE)
 
-    # Load datasets
-    train_loader, val_loader, test_loader = load_oxford_pets_dataset(
+    # Load datasets using new prepare_data_loaders
+    data = prepare_data_loaders(
         data_dir=Config.DATA_DIR,
         image_size=(224, 224),
         batch_size=Config.BATCH_SIZE,
         num_workers=4
     )
+
+    train_loader = data['finetune']['train']
+    val_loader   = data['finetune']['val']
+    test_loader  = data['finetune']['test']
 
     optimizer = optim.Adam(
         model.parameters(), 
@@ -59,11 +61,10 @@ def train():
         weight_decay=Config.WEIGHT_DECAY
     )
 
-    # ✅ Add Cosine Annealing Learning Rate Scheduler
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=Config.EPOCHS,
-        eta_min=1e-6  # Final minimal LR
+        eta_min=1e-6
     )
 
     criterion = nn.CrossEntropyLoss()
@@ -99,7 +100,6 @@ def train():
 
             loop.set_postfix(loss=loss.item(), acc=100 * correct / total)
 
-        # Step the scheduler after each epoch
         scheduler.step()
 
         # Evaluate on validation set

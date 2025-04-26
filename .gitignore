@@ -85,3 +85,5 @@ Thumbs.db
 
 # Allow all .py files anywhere
 !**/*.py
+
+.results/

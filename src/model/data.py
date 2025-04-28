@@ -44,9 +44,9 @@ def load_datasets(data_dir, image_size=(224, 224)):
 
     return train_dataset, val_dataset, test_dataset
 
-def prepare_data_loaders(data_dir=Config.DATA_DIR, forget_class_name="Egyptian Mau", image_size=(224, 224), batch_size=32, num_workers=2):
+def prepare_data_loaders(data_dir=Config.DATA_DIR, image_size=(224, 224), num_workers=2):
     """
-    Returns a nested dictionary matching the diagram:
+    Returns a nested dictionary matching the updated structure:
     
     data = {
         'finetune': {
@@ -63,6 +63,8 @@ def prepare_data_loaders(data_dir=Config.DATA_DIR, forget_class_name="Egyptian M
 
     # Map class names to indices
     class_to_idx = train_dataset.class_to_idx
+    # Get the class name from Config.FORGET.CLASS_TO_FORGET list (first element)
+    forget_class_name = Config.FORGET.CLASS_TO_FORGET[0]
     forget_class_idx = class_to_idx[forget_class_name]
 
     print(f"🧠 Forgetting class '{forget_class_name}' with label index {forget_class_idx}")
@@ -75,22 +77,22 @@ def prepare_data_loaders(data_dir=Config.DATA_DIR, forget_class_name="Egyptian M
     # Build the loader tree
     data = {
         'finetune': {
-            'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True),
-            'val':   DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
-            'test':  DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
+            'train': DataLoader(train_dataset, batch_size=Config.FINETUNE.BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True),
+            'val':   DataLoader(val_dataset, batch_size=Config.FINETUNE.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
+            'test':  DataLoader(test_dataset, batch_size=Config.FINETUNE.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
         },
         'forgetting': {
             'train': {
-                'forget': DataLoader(forget_train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True),
-                'retain': DataLoader(retain_train, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True),
+                'forget': DataLoader(forget_train, batch_size=Config.FORGET.BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True),
+                'retain': DataLoader(retain_train, batch_size=Config.FORGET.BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True),
             },
             'val': {
-                'forget': DataLoader(forget_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
-                'retain': DataLoader(retain_val, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
+                'forget': DataLoader(forget_val, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
+                'retain': DataLoader(retain_val, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
             },
             'test': {
-                'forget': DataLoader(forget_test, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
-                'retain': DataLoader(retain_test, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True),
+                'forget': DataLoader(forget_test, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
+                'retain': DataLoader(retain_test, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
             }
         }
     }
@@ -119,4 +121,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

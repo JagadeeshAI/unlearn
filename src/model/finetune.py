@@ -12,7 +12,8 @@ from transformers import ViTForImageClassification
 from tqdm import tqdm
 
 from config import Config
-from src.finetune.data import prepare_data_loaders  # updated import!
+from src.model.data import prepare_data_loaders 
+from src.model.model import build_vit_model
 
 def evaluate(model, data_loader):
     """Evaluates the model and returns accuracy."""
@@ -31,8 +32,8 @@ def evaluate(model, data_loader):
 
 def train():
     """Fine-tunes ViT on Oxford-IIIT Pets dataset."""
-    if not os.path.exists(Config.MODEL_DIR):
-        os.makedirs(Config.MODEL_DIR, exist_ok=True)
+    if not os.path.exists(Config.FINETUNE.OUT_DIR):
+        os.makedirs(Config.FINETUNE.OUT_DIR, exist_ok=True)
 
     print("Loading ViT model...")
     model = ViTForImageClassification.from_pretrained(
@@ -47,7 +48,6 @@ def train():
     data = prepare_data_loaders(
         data_dir=Config.DATA_DIR,
         image_size=(224, 224),
-        batch_size=Config.BATCH_SIZE,
         num_workers=4
     )
 
@@ -57,13 +57,13 @@ def train():
 
     optimizer = optim.Adam(
         model.parameters(), 
-        lr=Config.LEARNING_RATE, 
-        weight_decay=Config.WEIGHT_DECAY
+        lr=Config.FINETUNE.LR, 
+        weight_decay=Config.FINETUNE.WEIGHT_DECAY
     )
 
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=Config.EPOCHS,
+        T_max=Config.FINETUNE.EPOCHS,
         eta_min=1e-6
     )
 
@@ -72,7 +72,7 @@ def train():
     best_accuracy = 0
 
     print("Starting training...")
-    for epoch in range(Config.EPOCHS):
+    for epoch in range(Config.FINETUNE.EPOCHS):
         model.train()
         total_loss = 0
         correct, total = 0, 0
@@ -80,7 +80,7 @@ def train():
         loop = tqdm(
             enumerate(train_loader),
             total=len(train_loader),
-            desc=f"Epoch {epoch+1}/{Config.EPOCHS}",
+            desc=f"Epoch {epoch+1}/{Config.FINETUNE.EPOCHS}",
             unit="batch",
         )
 
@@ -109,7 +109,7 @@ def train():
         # Save model if validation accuracy improves
         if val_accuracy > best_accuracy:
             best_accuracy = val_accuracy
-            torch.save(model.state_dict(), Config.MODEL_PATH)
+            torch.save(model.state_dict(), Config.FINETUNE.MODEL_PATH)
             print(f"New best model saved with accuracy: {best_accuracy:.2f}%")
 
     print("Training complete!")

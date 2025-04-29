@@ -1,10 +1,11 @@
-# src/forget/test.py
+# src/model/test.py
+
 import os
 import json
 import logging
 from tqdm import tqdm
 
-# suppress TF/HF logs
+# suppress TF/HF noise
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 from transformers import logging as hf_logging
@@ -12,37 +13,32 @@ hf_logging.set_verbosity_error()
 
 import torch
 from transformers import ViTForImageClassification
-from peft import LoraConfig, get_peft_model, TaskType
-
 from config import Config
 from src.model.data import prepare_data_loaders
 
 def evaluate_model():
-    device = Config.DEVICE
-    print(f"🔍 Device: {device}")
+    # 1) Path to full merged model
+    ckpt = os.path.join(Config.FORGET.OUT_DIR, "merged_model.pth")
+    if not os.path.isfile(ckpt):
+        print(f"❌ Merged model not found at {ckpt}")
+        return
 
-    # 1) Load base ViT and wrap with LoRA (inference_mode=True)
-    print("🧠 Loading ViT and injecting LoRA adapters for inference…")
-    base = ViTForImageClassification.from_pretrained(
+    # 2) Load the base ViT model
+    print("🔍 Loading ViT architecture...")
+    model = ViTForImageClassification.from_pretrained(
         Config.FINETUNE.VIT_MODEL,
-        num_labels=37,
-        ignore_mismatched_sizes=True
+        num_labels=Config.FINETUNE.NUM_LABELS,
+        ignore_mismatched_sizes=True,
     )
-    peft_cfg = LoraConfig(
-        task_type=TaskType.FEATURE_EXTRACTION,
-        inference_mode=True,
-        r=Config.FORGET.LORA_RANK,
-        lora_alpha=1,
-        lora_dropout=0.0,
-        target_modules=["intermediate.dense", "output.dense"]
-    )
-    model = get_peft_model(base, peft_cfg)
-    # load the forgotten model
-    model.load_state_dict(torch.load(Config.FORGET.model_path(), map_location=device), strict=False)
-    model.to(device).eval()
-    print("✅ Model loaded!")
 
-    # 2) Prepare test DataLoader (use FINETUNE batch size)
+    print("🧠 Loading merged weights from:", ckpt)
+    state = torch.load(ckpt, map_location=Config.DEVICE)
+    model.load_state_dict(state, strict=True)
+
+    model.to(Config.DEVICE).eval()
+    print("✅ Model ready for evaluation.")
+
+    # 3) Prepare your test data
     data = prepare_data_loaders(
         data_dir=Config.DATA_DIR,
         image_size=(224, 224),
@@ -50,48 +46,45 @@ def evaluate_model():
     )
     test_loader = data['finetune']['test']
 
-    # 3) Run evaluation
-    correct = 0
-    total = 0
-    class_correct = [0] * 37
-    class_total   = [0] * 37
-    class_names   = test_loader.dataset.classes
+    # 4) Run evaluation
+    correct = total = 0
+    per_class_correct = [0] * Config.FINETUNE.NUM_LABELS
+    per_class_total   = [0] * Config.FINETUNE.NUM_LABELS
 
-    print("🚀 Evaluating on Oxford-IIIT Pet Test set…")
+    print("🚀 Evaluating on test set…")
     with torch.no_grad():
         for images, labels in tqdm(test_loader, desc="Testing", unit="batch"):
-            images, labels = images.to(device), labels.to(device)
-            # forward through the base_model to avoid unwanted kwargs
-            outputs = model.base_model(pixel_values=images)
-            preds = outputs.logits.argmax(dim=-1)
+            images, labels = images.to(Config.DEVICE), labels.to(Config.DEVICE)
+            logits = model(pixel_values=images).logits
+            preds  = logits.argmax(dim=-1)
 
-            total += labels.size(0)
+            total  += labels.size(0)
             correct += (preds == labels).sum().item()
 
-            for i, lab in enumerate(labels):
-                class_total[lab] += 1
-                if preds[i] == lab:
-                    class_correct[lab] += 1
+            for i in range(labels.size(0)):
+                lbl = labels[i].item()
+                if preds[i].item() == lbl:
+                    per_class_correct[lbl] += 1
+                per_class_total[lbl] += 1
 
     overall_acc = 100 * correct / total
     print(f"\n✅ Overall Test Accuracy: {overall_acc:.2f}%")
 
-    # 4) Per-class accuracies
+    # 5) Per-class breakdown
     print("\n📊 Per-Class Accuracy:")
-    results = {
-        "overall_accuracy": overall_acc,
-        "per_class_accuracy": {}
-    }
+    class_names = test_loader.dataset.classes
+    results = {"overall_accuracy": overall_acc, "per_class_accuracy": {}}
+
     for idx, name in enumerate(class_names):
-        if class_total[idx] > 0:
-            acc = 100 * class_correct[idx] / class_total[idx]
+        if per_class_total[idx] > 0:
+            acc = 100 * per_class_correct[idx] / per_class_total[idx]
         else:
             acc = 0.0
         print(f"  {name}: {acc:.2f}%")
         results["per_class_accuracy"][name] = acc
 
-    # 5) Save to JSON
-    out_path = os.path.join(Config.FORGET.OUT_DIR, "after_forgetting_results.json")
+    # 6) Dump JSON report
+    out_path = os.path.join(Config.FORGET.OUT_DIR, "after.json")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=4)
     print(f"\n📝 Results saved to {out_path}")

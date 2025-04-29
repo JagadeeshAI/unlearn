@@ -1,9 +1,9 @@
 # src/forget/forget.py
+
 import os
 import logging
 from tqdm import tqdm
 from itertools import cycle
-import math
 
 # suppress TF/HF noise
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -36,27 +36,28 @@ def group_sparsity_loss(model):
             loss = loss + param.norm()
     return loss
 
-def evaluate(backbone, loader, device):
-    backbone.eval()
+def evaluate(model, loader, device):
+    model.eval()
     correct = total = 0
     with torch.no_grad():
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
-            outputs = backbone(pixel_values=images)
-            preds = outputs.logits.argmax(dim=-1)
+            outputs = model.base_model(pixel_values=images).logits
+            preds = outputs.argmax(dim=-1)
             correct += (preds == labels).sum().item()
             total   += labels.size(0)
     return 100 * correct / total
 
 def train_forget():
-    # 1) Load Stage-1 fine-tuned ViT
     ckpt = Config.FINETUNE.model_path()
     if not os.path.exists(ckpt):
         print("❌ Run Stage 1 finetuning first.")
         return
 
+    os.makedirs(Config.FORGET.OUT_DIR, exist_ok=True)
+
     print(f"Device: {Config.DEVICE}")
-    print("🧠 Loading ViT + injecting LoRA adapters…")
+    print("🧠 Loading ViT + LoRA adapters…")
     base = ViTForImageClassification.from_pretrained(
         Config.FINETUNE.VIT_MODEL,
         num_labels=Config.FINETUNE.NUM_LABELS,
@@ -64,50 +65,40 @@ def train_forget():
     )
     base.load_state_dict(torch.load(ckpt, map_location="cpu"), strict=False)
 
-    # 2) Attach LoRA (this modifies `base` in-place)
     peft_cfg = LoraConfig(
-        task_type=TaskType.FEATURE_EXTRACTION,   # leave as FEATURE_EXTRACTION
+        task_type=TaskType.FEATURE_EXTRACTION,
         inference_mode=False,
         r=Config.FORGET.LORA_RANK,
         lora_alpha=1,
         lora_dropout=0.0,
         target_modules=["intermediate.dense", "output.dense"]
     )
-    peft_model = get_peft_model(base, peft_cfg)
+    model = get_peft_model(base, peft_cfg)
 
-    # 3) Extract the modified ViTForImageClassification
-    backbone = peft_model.get_base_model()
-    del peft_model  # we no longer use the wrapper
+    for name, param in model.named_parameters():
+        param.requires_grad = "lora_" in name
 
-    # 4) Freeze all but LoRA parameters
-    for name, param in backbone.named_parameters():
-        param.requires_grad = ("lora_" in name)
-
-    adapters   = [p for p in backbone.parameters() if p.requires_grad]
-    total      = sum(p.numel() for p in backbone.parameters())
-    trainable  = sum(p.numel() for p in adapters)
+    adapters  = [p for p in model.parameters() if p.requires_grad]
+    total     = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in adapters)
     print(f"Trainable params: {trainable:,}/{total:,} ({100*trainable/total:.2f}%)")
-    assert trainable > 0, "❌ No LoRA parameters enabled!"
 
-    backbone.to(Config.DEVICE)
+    model.to(Config.DEVICE)
 
-    # 5) Prepare data loaders
-    data    = prepare_data_loaders(Config.DATA_DIR, image_size=(224,224), num_workers=4)
+    data     = prepare_data_loaders(Config.DATA_DIR, image_size=(224,224), num_workers=4)
     loader_r = data['forgetting']['train']['retain']
     loader_f = data['forgetting']['train']['forget']
     val_r    = data['forgetting']['val']['retain']
     val_f    = data['forgetting']['val']['forget']
 
-    # 6) Optimizer & LR scheduler
     optimizer = AdamW(adapters, lr=Config.FORGET.LR, weight_decay=Config.FORGET.WEIGHT_DECAY)
     scheduler = CosineAnnealingLR(optimizer, T_max=Config.FORGET.EPOCHS)
 
-    # 7) GS-LoRA training loop
     print("🚀 Starting GS-LoRA forgetting…")
     for epoch in range(1, Config.FORGET.EPOCHS + 1):
-        backbone.train()
+        model.train()
         sum_ret = sum_for = sum_struc = steps = 0
-        alpha   = 0.0 if epoch <= Config.FORGET.WARMUP_EPOCHS else Config.FORGET.ALPHA
+        alpha = 0.0 if epoch <= Config.FORGET.WARMUP_EPOCHS else Config.FORGET.ALPHA
 
         forget_cycle = cycle(loader_f)
         loop = tqdm(loader_r, total=len(loader_r),
@@ -118,15 +109,14 @@ def train_forget():
             xr, yr = xr.to(Config.DEVICE), yr.to(Config.DEVICE)
             xf, yf = xf.to(Config.DEVICE), yf.to(Config.DEVICE)
 
-            # Forward & compute losses
-            out_r   = backbone(pixel_values=xr)
-            loss_r  = retention_loss(out_r.logits, yr)
+            out_r = model.base_model(pixel_values=xr).logits
+            loss_r = retention_loss(out_r, yr)
 
-            out_f   = backbone(pixel_values=xf)
-            loss_f  = forgetting_loss(out_f.logits, yf)
+            out_f = model.base_model(pixel_values=xf).logits
+            loss_f = forgetting_loss(out_f, yf)
 
-            loss_s  = group_sparsity_loss(backbone)
-            loss    = loss_r + Config.FORGET.BETA * loss_f + alpha * loss_s
+            loss_s = group_sparsity_loss(model)
+            loss   = loss_r + Config.FORGET.BETA * loss_f + alpha * loss_s
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -144,26 +134,35 @@ def train_forget():
             })
 
         scheduler.step()
+
+        # # Save per-epoch snapshot (adapters only)
+        # epoch_dir = os.path.join(Config.FORGET.OUT_DIR, f"epoch_{epoch}")
+        # model.save_pretrained(epoch_dir)
+        # print(f"💾 Saved epoch {epoch} snapshot to {epoch_dir}")
+
         print(f"📊 Epoch {epoch:2d} — "
               f"Avg Ret={sum_ret/steps:.4f}  "
               f"Avg For={sum_for/steps:.4f}  "
               f"Avg Struc={sum_struc/steps:.4f}")
 
-        # optional per-epoch checkpoint
-        os.makedirs(Config.FORGET.OUT_DIR, exist_ok=True)
-        torch.save(backbone.state_dict(),
-                   os.path.join(Config.FORGET.OUT_DIR, f"gs_epoch{epoch}.pth"))
-
     print("✅ GS-LoRA forgetting complete!")
 
-    # 8) Final evaluation
-    acc_f = evaluate(backbone, val_f, Config.DEVICE)
-    acc_r = evaluate(backbone, val_r, Config.DEVICE)
+    acc_f = evaluate(model, val_f, Config.DEVICE)
+    acc_r = evaluate(model, val_r, Config.DEVICE)
     print(f"\n🎯 Forgotten Acc: {acc_f:.2f}%   🎯 Retained Acc: {acc_r:.2f}%")
 
-    # 9) Save the final “forgotten” model
-    torch.save(backbone.state_dict(), Config.FORGET.model_path())
-    print(f"💾 Final model saved to {Config.FORGET.model_path()}")
+    # Merge adapters and save final full model
+    print("🔀 Merging adapters into a plain ViT…")
+    merged = model.merge_and_unload()
+
+    # Save Huggingface model
+    merged.save_pretrained(Config.FORGET.OUT_DIR)
+    print(f"💾 Final merged model saved (Huggingface format) to {Config.FORGET.OUT_DIR}")
+
+    # Save PyTorch .pth model
+    pth_path = os.path.join(Config.FORGET.OUT_DIR, "merged_model.pth")
+    torch.save(merged.state_dict(), pth_path)
+    print(f"💾 Full PyTorch model saved at {pth_path}")
 
 if __name__ == "__main__":
     train_forget()

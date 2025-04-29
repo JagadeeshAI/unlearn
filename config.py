@@ -39,7 +39,7 @@ class Config:
         ALPHA = 0.001       # Group sparsity loss weight after warmup
         WARMUP_EPOCHS = 10 # Epochs before applying sparsity
         LORA_RANK = 8      # Rank of LoRA adapters
-        CLASS_TO_FORGET = ["Bombay"]
+        CLASS_TO_FORGET = ["Wheaten Terrier"]
         NUM_LABELS=37
         @staticmethod
         def model_path():

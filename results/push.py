@@ -14,7 +14,7 @@ if not os.path.exists(local_folder):
 # 2. Upload the folder
 upload_folder(
     folder_path=local_folder,
-    path_in_repo="results",        # Inside Hugging Face repo -> under /results
+    path_in_repo="seg",        # Inside Hugging Face repo -> under /results
     repo_id=repo_id,
     repo_type=repo_type,
     commit_message="Uploading results 🚀",

@@ -12,82 +12,147 @@ from transformers import logging as hf_logging
 hf_logging.set_verbosity_error()
 
 import torch
-from transformers import ViTForImageClassification
+import matplotlib.pyplot as plt
+from torchvision.utils import make_grid
+
+from transformers import SegformerForSemanticSegmentation
 from config import Config
-from src.model.data import prepare_data_loaders
+from src.model.data import prepare_segmentation_loader
+
+def visualize_predictions(images, preds, masks, save_dir="/media/jagadeesh/volD/unlearn/vis", num_samples=5):
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    for idx in range(min(num_samples, images.size(0))):
+        img = images[idx].cpu()
+        mask = masks[idx].cpu()
+        pred = preds[idx].cpu()
+
+        fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+
+        axs[0].imshow(img.permute(1, 2, 0) * 0.5 + 0.5)
+        axs[0].set_title("Input Image")
+        axs[0].axis('off')
+
+        axs[1].imshow(mask)
+        axs[1].set_title("Ground Truth")
+        axs[1].axis('off')
+
+        axs[2].imshow(pred)
+        axs[2].set_title("Prediction")
+        axs[2].axis('off')
+
+        plt.tight_layout()
+        save_path = os.path.join(save_dir, f"sample_{idx}.png")
+        plt.savefig(save_path)
+        print(f"✅ Saved: {save_path}")  # <-- Add this line
+        plt.close()
+
 
 def evaluate_model():
-    # 1) Path to full merged model
-    ckpt = os.path.join(Config.FORGET.OUT_DIR, "merged_model.pth")
-    if not os.path.isfile(ckpt):
-        print(f"❌ Merged model not found at {ckpt}")
-        return
-
-    # 2) Load the base ViT model
-    print("🔍 Loading ViT architecture...")
-    model = ViTForImageClassification.from_pretrained(
-        Config.FINETUNE.VIT_MODEL,
-        num_labels=Config.FINETUNE.NUM_LABELS,
+    # 1) Load Pretrained SegFormer
+    print("🔍 Loading SegFormer architecture...")
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        Config.FINETUNE.SEGFORMER_MODEL,
+        num_labels=150,
         ignore_mismatched_sizes=True,
     )
-
-    print("🧠 Loading merged weights from:", ckpt)
-    state = torch.load(ckpt, map_location=Config.DEVICE)
-    model.load_state_dict(state, strict=True)
+    
+    checkpoint_path = "results/learned/best_segformer_lora.pth"
+    
+    state_dict = torch.load(checkpoint_path, map_location=Config.DEVICE)
+    model.load_state_dict(state_dict, strict=False)
+    print(f"✅ Loaded weights from {checkpoint_path}")
 
     model.to(Config.DEVICE).eval()
     print("✅ Model ready for evaluation.")
 
-    # 3) Prepare your test data
-    data = prepare_data_loaders(
+    # 2) Prepare val data
+    val_loader = prepare_segmentation_loader(
         data_dir=Config.DATA_DIR,
-        image_size=(224, 224),
-        num_workers=2
+        split="val",
+        batch_size=Config.FINETUNE.BATCH_SIZE,
+        num_workers=2,
     )
-    test_loader = data['finetune']['test']
 
-    # 4) Run evaluation
-    correct = total = 0
-    per_class_correct = [0] * Config.FINETUNE.NUM_LABELS
-    per_class_total   = [0] * Config.FINETUNE.NUM_LABELS
+    # 3) Run evaluation
+    total_pixels = 0
+    correct_pixels = 0
 
-    print("🚀 Evaluating on test set…")
+    iou_sum = 0
+    iou_count = 0
+
+    preds_list = []
+    masks_list = []
+    images_list = []
+
+    print("🚀 Evaluating on validation set…")
     with torch.no_grad():
-        for images, labels in tqdm(test_loader, desc="Testing", unit="batch"):
-            images, labels = images.to(Config.DEVICE), labels.to(Config.DEVICE)
-            logits = model(pixel_values=images).logits
-            preds  = logits.argmax(dim=-1)
+        for images, masks, _, _ in tqdm(val_loader, desc="Validating", unit="batch"):
+            images, masks = images.to(Config.DEVICE), masks.to(Config.DEVICE)
+            outputs = model(pixel_values=images)
 
-            total  += labels.size(0)
-            correct += (preds == labels).sum().item()
+            if hasattr(outputs, 'logits'):
+                preds = outputs.logits
+            else:
+                preds = outputs
 
-            for i in range(labels.size(0)):
-                lbl = labels[i].item()
-                if preds[i].item() == lbl:
-                    per_class_correct[lbl] += 1
-                per_class_total[lbl] += 1
+            preds = torch.nn.functional.interpolate(
+                preds,
+                size=masks.shape[-2:],
+                mode="bilinear",
+                align_corners=False
+            )
 
-    overall_acc = 100 * correct / total
-    print(f"\n✅ Overall Test Accuracy: {overall_acc:.2f}%")
+            preds_classes = preds.argmax(dim=1)
 
-    # 5) Per-class breakdown
-    print("\n📊 Per-Class Accuracy:")
-    class_names = test_loader.dataset.classes
-    results = {"overall_accuracy": overall_acc, "per_class_accuracy": {}}
+            correct_pixels += (preds_classes == masks).sum().item()
+            total_pixels += masks.numel()
 
-    for idx, name in enumerate(class_names):
-        if per_class_total[idx] > 0:
-            acc = 100 * per_class_correct[idx] / per_class_total[idx]
-        else:
-            acc = 0.0
-        print(f"  {name}: {acc:.2f}%")
-        results["per_class_accuracy"][name] = acc
+            # IoU calculation
+            for cls in range(Config.FINETUNE.NUM_LABELS):
+                pred_inds = (preds_classes == cls)
+                target_inds = (masks == cls)
+                intersection = (pred_inds & target_inds).sum().item()
+                union = (pred_inds | target_inds).sum().item()
 
-    # 6) Dump JSON report
-    out_path = os.path.join(Config.FORGET.OUT_DIR, "after.json")
+                if union > 0:
+                    iou_sum += intersection / union
+                    iou_count += 1
+
+            if len(images_list) < 10:
+                images_list.append(images.cpu())
+                masks_list.append(masks.cpu())
+                preds_list.append(preds_classes.cpu())
+
+    overall_pixel_acc = 100 * correct_pixels / total_pixels
+    mean_iou = 100 * iou_sum / iou_count if iou_count > 0 else 0
+
+    print(f"\n✅ Pixel Accuracy: {overall_pixel_acc:.2f}%")
+    print(f"✅ Mean IoU: {mean_iou:.2f}%")
+
+    results = {
+        "pixel_accuracy": overall_pixel_acc,
+        "mean_iou": mean_iou,
+    }
+
+    # 4) Save metrics
+    os.makedirs(Config.FINETUNE.OUT_DIR, exist_ok=True)
+    out_path = os.path.join(Config.FINETUNE.OUT_DIR, "evaluation.json")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=4)
     print(f"\n📝 Results saved to {out_path}")
+
+    # 5) Visualize a few predictions
+    print("🖼️ Visualizing predictions...")
+    visualize_predictions(
+        images=torch.cat(images_list, dim=0),
+        preds=torch.cat(preds_list, dim=0),
+        masks=torch.cat(masks_list, dim=0),
+        save_dir=os.path.join(Config.FINETUNE.OUT_DIR, "visualizations"),
+        num_samples=5
+    )
+    print(f"✅ Visualization samples saved.")
 
 if __name__ == "__main__":
     evaluate_model()

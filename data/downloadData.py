@@ -1,58 +1,67 @@
 import os
+import zipfile
+import requests
 import shutil
-import random
-from torchvision.datasets import OxfordIIITPet
-from config import Config
+from tqdm import tqdm
 
-def download_and_prepare_data():
-    """Downloads Oxford-IIIT Pets dataset and splits into train, val, and test folders."""
-    dataset = OxfordIIITPet(root=Config.DATA_DIR, split="trainval", download=True)
+def download_ade20k(root="data"):
+    os.makedirs(root, exist_ok=True)
+    url = "http://data.csail.mit.edu/places/ADEchallenge/ADEChallengeData2016.zip"
+    zip_path = os.path.join(root, "ADEChallengeData2016.zip")
 
-    # Paths
-    images_dir = os.path.join(Config.DATA_DIR, "oxford-iiit-pet", "images")
-    train_dir = os.path.join(Config.DATA_DIR, "train")
-    val_dir = os.path.join(Config.DATA_DIR, "val")
-    test_dir = os.path.join(Config.DATA_DIR, "test")
+    # Download
+    if not os.path.exists(zip_path):
+        with requests.get(url, stream=True) as r, open(zip_path, 'wb') as f, tqdm(
+            unit='B', unit_scale=True, unit_divisor=1024, total=int(r.headers.get('content-length', 0))
+        ) as bar:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+                bar.update(len(chunk))
+        print("✅ Download complete.")
+    else:
+        print("📦 Zip file already exists. Skipping download.")
 
-    for folder in [train_dir, val_dir, test_dir]:
-        os.makedirs(folder, exist_ok=True)
+    # Extract
+    extracted_dir = os.path.join(root, "ADEChallengeData2016")
+    if not os.path.exists(os.path.join(extracted_dir, "images")):
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(root)
+        print("✅ Extraction complete.")
+    else:
+        print("📁 Data already extracted. Skipping extraction.")
 
-    # Get class names
-    class_names = dataset.classes
+    # Setup output folders (train/val based on ADE20K official split)
+    for split in ["train", "val"]:
+        os.makedirs(os.path.join(root, split, "images"), exist_ok=True)
+        os.makedirs(os.path.join(root, split, "annotations"), exist_ok=True)
 
-    # Prepare (image_filename, class_name) list
-    data = []
-    for i in range(len(dataset)):
-        image_path, label = dataset._images[i], dataset[i][1]  # label is 0-based
-        class_name = class_names[label]
-        image_name = image_path.with_suffix('.jpg').name  # e.g., "Abyssinian_12.jpg"
-        data.append((image_name, class_name))
+    # Copy images and annotations for official train split
+    train_img_dir = os.path.join(extracted_dir, "images/training")
+    train_ann_dir = os.path.join(extracted_dir, "annotations/training")
+    for fname in os.listdir(train_img_dir):
+        if fname.endswith(".jpg"):
+            ann_name = fname.replace(".jpg", ".png")
+            img_src = os.path.join(train_img_dir, fname)
+            ann_src = os.path.join(train_ann_dir, ann_name)
+            img_dst = os.path.join(root, "train", "images", fname)
+            ann_dst = os.path.join(root, "train", "annotations", ann_name)
+            shutil.copy(img_src, img_dst)
+            shutil.copy(ann_src, ann_dst)
 
-    # Shuffle and split
-    random.shuffle(data)
-    total = len(data)
-    train_end = int(0.8 * total)
-    val_end = int(0.9 * total)
+    # Copy images and annotations for official val split
+    val_img_dir = os.path.join(extracted_dir, "images/validation")
+    val_ann_dir = os.path.join(extracted_dir, "annotations/validation")
+    for fname in os.listdir(val_img_dir):
+        if fname.endswith(".jpg"):
+            ann_name = fname.replace(".jpg", ".png")
+            img_src = os.path.join(val_img_dir, fname)
+            ann_src = os.path.join(val_ann_dir, ann_name)
+            img_dst = os.path.join(root, "val", "images", fname)
+            ann_dst = os.path.join(root, "val", "annotations", ann_name)
+            shutil.copy(img_src, img_dst)
+            shutil.copy(ann_src, ann_dst)
 
-    splits = {
-        train_dir: data[:train_end],
-        val_dir: data[train_end:val_end],
-        test_dir: data[val_end:]
-    }
-
-    # Copy images
-    for split_dir, split_data in splits.items():
-        for img_name, class_name in split_data:
-            src = os.path.join(images_dir, img_name)
-            dst_dir = os.path.join(split_dir, class_name)
-            os.makedirs(dst_dir, exist_ok=True)
-            shutil.copy(src, os.path.join(dst_dir, img_name))
-
-    shutil.move("data/oxford-iiit-pet/test", "data/test")
-    shutil.move("data/oxford-iiit-pet/train", "data/train")
-    shutil.move("data/oxford-iiit-pet/val", "data/val")
-    shutil.rmtree("data/oxford-iiit-pet")
-    print("✅ Dataset successfully split into train, val, and test folders.")
+    print("✅ Dataset organized with official ADE20K train/val split.")
 
 if __name__ == "__main__":
-    download_and_prepare_data()
+    download_ade20k()

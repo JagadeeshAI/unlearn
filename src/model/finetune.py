@@ -1,169 +1,177 @@
-# src/forget/forget.py
+# train.py
 
 import os
-import logging
-from tqdm import tqdm
-from itertools import cycle
 
-# suppress TF/HF noise
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import logging
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
-from transformers import logging as hf_logging
-hf_logging.set_verbosity_error()
 
 import torch
 import torch.nn.functional as F
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-
-from transformers import ViTForImageClassification
-from peft import LoraConfig, get_peft_model, TaskType
-
+from tqdm import tqdm
+from transformers import SegformerForSemanticSegmentation
 from config import Config
-from src.model.data import prepare_data_loaders
+from src.model.data import prepare_segmentation_loader
 
+def compute_metrics(preds, masks, num_classes):
+    preds = preds.view(-1)
+    masks = masks.view(-1)
 
-def retention_loss(logits, labels):
-    return F.cross_entropy(logits, labels)
+    ious = []
+    for cls in range(num_classes):
+        pred_inds = preds == cls
+        target_inds = masks == cls
+        intersection = (pred_inds & target_inds).sum().item()
+        union = (pred_inds | target_inds).sum().item()
+        if union > 0:
+            ious.append(intersection / union)
+    return sum(ious) / len(ious) if ious else 0.0
 
+def inject_lora(model, rank=8):
+    """
+    Adds LoRA adapters to FFN (MLP) layers inside SegFormer Transformer blocks.
+    """
+    for name, module in model.named_modules():
+        if "encoder.block" in name and hasattr(module, "intermediate"):
+            # Inject LoRA into intermediate dense (FFN first layer)
+            if hasattr(module.intermediate, "dense"):
+                dense_layer = module.intermediate.dense
 
-def forgetting_loss(logits, labels):
-    ce = F.cross_entropy(logits, labels)
-    return F.relu(Config.FORGET.BND - ce)
+                # Wrap dense layer with LoRA
+                lora = torch.nn.Linear(dense_layer.in_features, dense_layer.out_features, bias=False)
+                torch.nn.init.kaiming_uniform_(lora.weight, a=math.sqrt(5))
+                module.intermediate.dense_lora = lora  # add a lora dense layer
+                module.intermediate.lora_scale = torch.nn.Parameter(torch.zeros(1))  # learnable scale
 
+            # Inject LoRA into output dense (FFN second layer)
+            if hasattr(module.output, "dense"):
+                dense_layer = module.output.dense
 
-def group_sparsity_loss(model):
-    loss = torch.tensor(0.0, device=next(model.parameters()).device)
-    for name, param in model.named_parameters():
-        if "lora_A" in name or "lora_B" in name:
-            loss = loss + param.norm()
-    return loss
+                lora = torch.nn.Linear(dense_layer.in_features, dense_layer.out_features, bias=False)
+                torch.nn.init.kaiming_uniform_(lora.weight, a=math.sqrt(5))
+                module.output.dense_lora = lora
+                module.output.lora_scale = torch.nn.Parameter(torch.zeros(1))
 
+    print("✅ LoRA injected into SegFormer FFN layers.")
 
-def evaluate(model, loader, device):
-    model.eval()
-    correct = total = 0
-    with torch.no_grad():
-        for images, labels in loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(pixel_values=images).logits
-            preds = outputs.argmax(dim=-1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-    return 100 * correct / total
+def apply_lora_forward(module, x):
+    """
+    Modify forward pass: output = normal_dense(x) + scale * lora_dense(x)
+    """
+    normal_out = module.dense(x)
+    if hasattr(module, 'dense_lora') and hasattr(module, 'lora_scale'):
+        lora_out = module.dense_lora(x)
+        return normal_out + module.lora_scale * lora_out
+    else:
+        return normal_out
 
+def patch_model_with_lora(model):
+    """
+    Patch SegFormer MLP forward methods to include LoRA
+    """
+    for name, module in model.named_modules():
+        if "encoder.block" in name and hasattr(module, "intermediate"):
+            if hasattr(module.intermediate, "dense_lora"):
+                module.intermediate.forward = lambda x, module=module.intermediate: apply_lora_forward(module, x)
+            if hasattr(module.output, "dense_lora"):
+                module.output.forward = lambda x, module=module.output: apply_lora_forward(module, x)
 
-def train_forget():
-    # 1) Load Stage-1 fine-tuned ViT
-    ckpt = Config.FINETUNE.model_path()
-    if not os.path.exists(ckpt):
-        print("❌ Run Stage 1 finetuning first.")
-        return
-
-    os.makedirs(Config.FORGET.OUT_DIR, exist_ok=True)
-
-    print(f"Device: {Config.DEVICE}")
-    print("🧠 Loading ViT + injecting LoRA adapters…")
-    base = ViTForImageClassification.from_pretrained(
-        Config.FINETUNE.VIT_MODEL,
+def train():
+    # 1. Load pretrained SegFormer model
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        "nvidia/segformer-b5-finetuned-ade-640-640",
         num_labels=Config.FINETUNE.NUM_LABELS,
-        ignore_mismatched_sizes=True
+        ignore_mismatched_sizes=True,
+    ).to(Config.DEVICE)
+
+   
+    
+
+
+    # 1b. Inject LoRA
+    inject_lora(model, rank=Config.FINETUNE.LORA_RANK)
+    patch_model_with_lora(model)
+
+    # 2. Load datasets
+    train_loader = prepare_segmentation_loader(
+        data_dir=Config.DATA_DIR,
+        split="train",
+        batch_size=Config.FINETUNE.BATCH_SIZE,
+        num_workers=2,
     )
-    base.load_state_dict(torch.load(ckpt, map_location="cpu"), strict=False)
-
-    # 2) Attach LoRA
-    peft_cfg = LoraConfig(
-        task_type=TaskType.FEATURE_EXTRACTION,
-        inference_mode=False,
-        r=Config.FORGET.LORA_RANK,
-        lora_alpha=1,
-        lora_dropout=0.0,
-        target_modules=["intermediate.dense", "output.dense"]
+    val_loader = prepare_segmentation_loader(
+        data_dir=Config.DATA_DIR,
+        split="val",
+        batch_size=Config.FINETUNE.BATCH_SIZE,
+        num_workers=2,
     )
-    model = get_peft_model(base, peft_cfg)
 
-    # 3) Freeze LoRA only
-    for name, param in model.named_parameters():
-        param.requires_grad = "lora_" in name
+    checkpoint_path = "results/learned/best_segformer_lora.pth"
+    
+    state_dict = torch.load(checkpoint_path, map_location=Config.DEVICE)
+    model.load_state_dict(state_dict, strict=False)
+    print(f"✅ Loaded weights from {checkpoint_path}")
 
-    adapters  = [p for p in model.parameters() if p.requires_grad]
-    total     = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in adapters)
-    print(f"Trainable params: {trainable:,}/{total:,} ({100*trainable/total:.2f}%)")
+    # 3. Optimizer
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),  # Only LoRA params will be trained if needed
+        lr=Config.FINETUNE.LR,
+        weight_decay=Config.FINETUNE.WEIGHT_DECAY,
+    )
 
-    model.to(Config.DEVICE)
+    best_iou = 0.0
+    os.makedirs(Config.FINETUNE.OUT_DIR, exist_ok=True)
 
-    # 4) Data loaders
-    data     = prepare_data_loaders(Config.DATA_DIR, image_size=(224,224), num_workers=4)
-    loader_r = data['forgetting']['train']['retain']
-    loader_f = data['forgetting']['train']['forget']
-    val_r    = data['forgetting']['val']['retain']
-    val_f    = data['forgetting']['val']['forget']
-
-    # 5) Optimizer & scheduler
-    optimizer = AdamW(adapters, lr=Config.FORGET.LR, weight_decay=Config.FORGET.WEIGHT_DECAY)
-    scheduler = CosineAnnealingLR(optimizer, T_max=Config.FORGET.EPOCHS)
-
-    # 6) GS-LoRA forgetting loop
-    print("🚀 Starting GS-LoRA forgetting…")
-    for epoch in range(1, Config.FORGET.EPOCHS + 1):
+    for epoch in range(Config.FINETUNE.EPOCHS):
         model.train()
-        sum_ret = sum_for = sum_struc = steps = 0
-        alpha = 0.0 if epoch <= Config.FORGET.WARMUP_EPOCHS else Config.FORGET.ALPHA
+        total_loss = 0.0
+        loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{Config.FINETUNE.EPOCHS}", unit="batch")
 
-        forget_cycle = cycle(loader_f)
-        loop = tqdm(loader_r, total=len(loader_r),
-                    desc=f"Epoch {epoch}/{Config.FORGET.EPOCHS}", unit="batch")
+        for images, masks, _, _ in loop:
+            images, masks = images.to(Config.DEVICE), masks.to(Config.DEVICE)
 
-        for xr, yr in loop:
-            xf, yf = next(forget_cycle)
-            xr, yr = xr.to(Config.DEVICE), yr.to(Config.DEVICE)
-            xf, yf = xf.to(Config.DEVICE), yf.to(Config.DEVICE)
+            outputs = model(pixel_values=images)
+            logits = outputs.logits
 
-            out_r = model(pixel_values=xr).logits
-            loss_r = retention_loss(out_r, yr)
+            if logits.shape[-2:] != masks.shape[-2:]:
+                logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
 
-            out_f = model(pixel_values=xf).logits
-            loss_f = forgetting_loss(out_f, yf)
+            loss = F.cross_entropy(logits, masks, ignore_index=150)
+            total_loss += loss.item()
 
-            loss_s = group_sparsity_loss(model)
-            loss   = loss_r + Config.FORGET.BETA * loss_f + alpha * loss_s
-
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            sum_ret   += loss_r.item()
-            sum_for   += loss_f.item()
-            sum_struc += loss_s.item()
-            steps     += 1
+            loop.set_postfix(loss=loss.item())  # Show live batch loss in tqdm bar
 
-            loop.set_postfix({
-                "Ret":   f"{loss_r:.4f}",
-                "For":   f"{loss_f:.4f}",
-                "Struc": f"{loss_s:.4f}"
-            })
+        avg_train_loss = total_loss / len(train_loader)
+        print(f"🔁 Epoch {epoch+1} - Avg Train Loss: {avg_train_loss:.4f}")
 
-        scheduler.step()
+        # 4. Evaluation
+        model.eval()
+        iou_total = 0.0
+        with torch.no_grad():
+            for images, masks, _, _ in tqdm(val_loader, desc="Validating", unit="batch"):
+                images, masks = images.to(Config.DEVICE), masks.to(Config.DEVICE)
+                outputs = model(pixel_values=images)
+                preds = outputs.logits
 
-        # ——— SAVE ONE .pth PER EPOCH ———
-        epoch_path = os.path.join(Config.FORGET.OUT_DIR, f"epoch_{epoch}.pth")
-        torch.save(model.state_dict(), epoch_path)
-        print(f"💾 Saved epoch {epoch} state_dict to {epoch_path}")
+                preds = F.interpolate(preds, size=masks.shape[-2:], mode="bilinear", align_corners=False)
+                preds = preds.argmax(dim=1)
 
-        print(f"📊 Epoch {epoch} — Avg Ret={sum_ret/steps:.4f}  Avg For={sum_for/steps:.4f}  Avg Struc={sum_struc:.2f}")
+                iou = compute_metrics(preds, masks, Config.FINETUNE.NUM_LABELS)
+                iou_total += iou
 
-    print("✅ GS-LoRA forgetting complete!")
+        avg_iou = iou_total / len(val_loader)
+        print(f"📊 Val Mean IoU: {avg_iou:.4f}")
 
-    # 7) Final evaluation
-    acc_f = evaluate(model, val_f, Config.DEVICE)
-    acc_r = evaluate(model, val_r, Config.DEVICE)
-    print(f"\n🎯 Forgotten Acc: {acc_f:.2f}%   🎯 Retained Acc: {acc_r:.2f}%")
-
-    # 8) Save the **one** final .pth
-    final_path = Config.FORGET.model_path()
-    torch.save(model.state_dict(), final_path)
-    print(f"💾 Final state_dict saved to {final_path}")
+        # Save best model
+        if avg_iou > best_iou:
+            best_iou = avg_iou
+            best_model_path = os.path.join(Config.FINETUNE.OUT_DIR, "best_segformer_lora.pth")
+            torch.save(model.state_dict(), best_model_path)
+            print(f"✅ Saved best model to {best_model_path} (IoU: {best_iou:.4f})")
 
 if __name__ == "__main__":
-    train_forget()
+    train()

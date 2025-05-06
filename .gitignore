@@ -87,3 +87,6 @@ Thumbs.db
 !**/*.py
 
 .results/
+
+.VimOffical/
+ VimOffical/

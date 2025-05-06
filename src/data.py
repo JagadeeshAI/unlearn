@@ -1,111 +1,106 @@
+# src/data.py
+
 import os
-import random
-from torchvision import transforms, datasets
-from torch.utils.data import DataLoader, Subset
+import json
+from PIL import Image, UnidentifiedImageError
+from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torchvision import transforms
 from config import Config
 
 def get_transforms(image_size=(224, 224)):
-    """Transforms for training set."""
     return transforms.Compose([
         transforms.RandomResizedCrop(image_size),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5]*3, std=[0.5]*3),
+        transforms.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
     ])
 
 def get_val_test_transforms(image_size=(224, 224)):
-    """Transforms for validation and test set."""
     return transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(image_size),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5]*3, std=[0.5]*3),
+        transforms.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
     ])
 
-def split_forget_retain(dataset, forget_class_idx):
-    """Splits dataset into forget subset and retain subset based on label."""
-    idx_forget = [i for i, (_, label) in enumerate(dataset) if label == forget_class_idx]
-    idx_retain = [i for i, (_, label) in enumerate(dataset) if label != forget_class_idx]
+class JsonlImageDataset(Dataset):
+    def __init__(self, jsonl_path, transform=None, tag_filter=None):
+        self.samples = []
+        print(f"📖 Reading {jsonl_path} with tag_filter={tag_filter}...")
+        with open(jsonl_path, "r") as f:
+            for line in tqdm(f, desc=f"Loading {os.path.basename(jsonl_path)}"):
+                item = json.loads(line)
+                if tag_filter and item["tag"] != tag_filter:
+                    continue
+                self.samples.append(item)
 
-    forget_set = Subset(dataset, idx_forget)
-    retain_set = Subset(dataset, idx_retain)
+        self.transform = transform
+        print(f"✅ Loaded {len(self.samples)} items.")
 
-    return forget_set, retain_set
+    def __len__(self):
+        return len(self.samples)
 
-def load_datasets(data_dir, image_size=(224, 224)):
-    """Loads train, val, test datasets."""
-    train_transform = get_transforms(image_size)
-    val_test_transform = get_val_test_transforms(image_size)
+    def __getitem__(self, idx):
+        entry = self.samples[idx]
+        try:
+            image = Image.open(entry["path"]).convert("RGB")
+        except (FileNotFoundError, UnidentifiedImageError) as e:
+            print(f"⚠️ Skipping unreadable image: {entry['path']} ({e})")
+            return self.__getitem__((idx + 1) % len(self.samples))  # Try next item
 
-    train_dataset = datasets.ImageFolder(os.path.join(data_dir, "train"), transform=train_transform)
-    val_dataset = datasets.ImageFolder(os.path.join(data_dir, "val"), transform=val_test_transform)
-    test_dataset = datasets.ImageFolder(os.path.join(data_dir, "test"), transform=val_test_transform)
+        if self.transform:
+            image = self.transform(image)
+        return image, entry["label"]
 
-    return train_dataset, val_dataset, test_dataset
+def prepare_data_loaders(data_dir=Config.DATA_DIR, image_size=(224, 224), num_workers=8):
+    index_dir = os.path.join(data_dir, "index")
+    train_jsonl = os.path.join(index_dir, "train.jsonl")
+    val_jsonl   = os.path.join(index_dir, "val.jsonl")
 
-def prepare_data_loaders(data_dir=Config.DATA_DIR, image_size=(224, 224), num_workers=2):
-    """
-    Returns a nested dictionary matching the updated structure:
-    
+    print("🔧 Initializing DataLoaders...\n")
+
+    train_forget = JsonlImageDataset(train_jsonl, transform=get_transforms(image_size), tag_filter="forget")
+    train_retain = JsonlImageDataset(train_jsonl, transform=get_transforms(image_size), tag_filter="retain")
+
+    val_forget = JsonlImageDataset(val_jsonl, transform=get_val_test_transforms(image_size), tag_filter="forget")
+    val_retain = JsonlImageDataset(val_jsonl, transform=get_val_test_transforms(image_size), tag_filter="retain")
+
+    combined_val = ConcatDataset([val_forget, val_retain])
+
     data = {
-        'finetune': {
-            'train': ..., 'val': ..., 'test': ...
-        },
-        'forgetting': {
-            'train': {'forget': ..., 'retain': ...},
-            'val': {'forget': ..., 'retain': ...},
-            'test': {'forget': ..., 'retain': ...},
-        }
-    }
-    """
-    train_dataset, val_dataset, test_dataset = load_datasets(data_dir, image_size)
-
-    # Map class names to indices
-    class_to_idx = train_dataset.class_to_idx
-    # Get the class name from Config.FORGET.CLASS_TO_FORGET list (first element)
-    forget_class_name = Config.FORGET.CLASS_TO_FORGET[0]
-    forget_class_idx = class_to_idx[forget_class_name]
-
-    print(f"🧠 Forgetting class '{forget_class_name}' with label index {forget_class_idx}")
-
-    # Split forget/retain sets
-    forget_train, retain_train = split_forget_retain(train_dataset, forget_class_idx)
-    forget_val, retain_val = split_forget_retain(val_dataset, forget_class_idx)
-    forget_test, retain_test = split_forget_retain(test_dataset, forget_class_idx)
-
-    # Build the loader tree
-    data = {
-        'finetune': {
-            'train': DataLoader(train_dataset, batch_size=Config.FINETUNE.BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True),
-            'val':   DataLoader(val_dataset, batch_size=Config.FINETUNE.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
-            'test':  DataLoader(test_dataset, batch_size=Config.FINETUNE.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
-        },
         'forgetting': {
             'train': {
-                'forget': DataLoader(forget_train, batch_size=Config.FORGET.BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True),
-                'retain': DataLoader(retain_train, batch_size=Config.FORGET.BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True),
+                'forget': DataLoader(train_forget, batch_size=Config.FORGET.BATCH_SIZE, shuffle=True,
+                                     num_workers=num_workers, pin_memory=True),
+                'retain': DataLoader(train_retain, batch_size=Config.FORGET.BATCH_SIZE, shuffle=True,
+                                     num_workers=num_workers, pin_memory=True),
             },
             'val': {
-                'forget': DataLoader(forget_val, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
-                'retain': DataLoader(retain_val, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
+                'forget': DataLoader(val_forget, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False,
+                                     num_workers=num_workers, pin_memory=True),
+                'retain': DataLoader(val_retain, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False,
+                                     num_workers=num_workers, pin_memory=True),
             },
             'test': {
-                'forget': DataLoader(forget_test, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
-                'retain': DataLoader(retain_test, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True),
+                'forget': DataLoader(val_forget, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False,
+                                     num_workers=num_workers, pin_memory=True),
+                'retain': DataLoader(val_retain, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False,
+                                     num_workers=num_workers, pin_memory=True),
             }
+        },
+        'finetune': {
+            'val': DataLoader(combined_val, batch_size=Config.FORGET.BATCH_SIZE, shuffle=False,
+                              num_workers=num_workers, pin_memory=True)
         }
     }
 
+    print("\n✅ All DataLoaders prepared.")
     return data
 
 def main():
     data = prepare_data_loaders()
-
-    print("\n📦 Finetune Loaders:")
-    print(f"Train Set Size: {len(data['finetune']['train'].dataset)}")
-    print(f"Val Set Size  : {len(data['finetune']['val'].dataset)}")
-    print(f"Test Set Size : {len(data['finetune']['test'].dataset)}")
 
     print("\n📦 Forgetting - Train Split:")
     print(f"Forget Train Size: {len(data['forgetting']['train']['forget'].dataset)}")
@@ -115,9 +110,9 @@ def main():
     print(f"Forget Val Size: {len(data['forgetting']['val']['forget'].dataset)}")
     print(f"Retain Val Size: {len(data['forgetting']['val']['retain'].dataset)}")
 
-    print("\n📦 Forgetting - Test Split:")
-    print(f"Forget Test Size: {len(data['forgetting']['test']['forget'].dataset)}")
-    print(f"Retain Test Size: {len(data['forgetting']['test']['retain'].dataset)}")
+    print("\n📦 Combined Finetune Val Split:")
+    combined = data['finetune']['val'].dataset
+    print(f"Combined Val Size: {sum(len(d) for d in combined.datasets)}")
 
 if __name__ == "__main__":
     main()

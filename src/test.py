@@ -2,7 +2,7 @@
 
 import torch
 from tqdm import tqdm
-from src.data import prepare_data_loaders
+from data import prepare_data_loaders
 from pathlib import PurePath
 from PIL import Image
 from huggingface_hub import snapshot_download
@@ -43,7 +43,7 @@ def load_model():
         img_size=224,
     )
 
-    checkpoint = torch.load(str(ckpt_path), map_location="cpu")
+    checkpoint = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["model"], strict=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

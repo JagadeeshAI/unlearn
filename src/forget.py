@@ -1,11 +1,11 @@
-# src/forget/forget.py
+# forget.py
 
 import os
 import logging
 from tqdm import tqdm
 from itertools import cycle
+from pathlib import PurePath
 
-# Suppress warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 from transformers import logging as hf_logging
@@ -82,7 +82,7 @@ def load_model():
     return model, device
 
 def train_forget():
-    print(f"Device: {Config.DEVICE}")
+    print(f"📟 Device: {Config.DEVICE}")
     os.makedirs(Config.FORGET.OUT_DIR, exist_ok=True)
 
     print("🧠 Initializing Vim-Tiny classifier...")
@@ -96,10 +96,12 @@ def train_forget():
     data = prepare_data_loaders(Config.DATA_DIR, image_size=(224, 224), num_workers=4)
     loader_r = data['forgetting']['train']['retain']
     loader_f = data['forgetting']['train']['forget']
-    val_r    = data['forgetting']['val']['retain']
-    val_f    = data['forgetting']['val']['forget']
+    val_r = data['forgetting']['val']['retain']
+    val_f = data['forgetting']['val']['forget']
 
     print("🚀 Starting forgetting fine-tuning…")
+
+    global_step = 0
     for epoch in range(1, Config.FORGET.EPOCHS + 1):
         model.train()
         sum_ret = sum_for = steps = 0
@@ -127,11 +129,17 @@ def train_forget():
             sum_ret += loss_r.item()
             sum_for += loss_f.item()
             steps += 1
+            global_step += 1
 
             loop.set_postfix({
                 "Ret": f"{loss_r:.4f}",
                 "For": f"{loss_f:.4f}"
             })
+
+            if global_step % 5000 == 0:
+                ckpt_path = os.path.join(Config.FORGET.OUT_DIR, f"checkpoint_ep{epoch}_step{global_step}.pth")
+                torch.save(model.state_dict(), ckpt_path)
+                print(f"💾 Saved intermediate checkpoint: {ckpt_path}")
 
         scheduler.step()
         print(f"📊 Epoch {epoch:2d} — Avg Ret={sum_ret/steps:.4f}  Avg For={sum_for/steps:.4f}")
@@ -140,13 +148,13 @@ def train_forget():
 
     acc_f = evaluate(model, val_f, Config.DEVICE)
     acc_r = evaluate(model, val_r, Config.DEVICE)
-    print(f"\n🎯 Forgotten Acc: {acc_f:.2f}%   🎯 Retained Acc: {acc_r:.2f}%")
+    print(f"\n🎯 Forgotten Accuracy: {acc_f:.2f}%")
+    print(f"🎯 Retained Accuracy: {acc_r:.2f}%")
 
     final_path = Config.FORGET.model_path()
     torch.save(model.state_dict(), final_path)
-    print(f"💾 Model saved to {final_path}")
+    print(f"💾 Final model saved to {final_path}")
+
 
 if __name__ == "__main__":
     train_forget()
-
-

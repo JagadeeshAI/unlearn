@@ -24,12 +24,15 @@ from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 from rope import *
 import random
 
+from MambaPEFT.vision.personal_lib.mmpretrain_local_backup.models.peft.vmamba_peft_all import set_peft
+
+
+
 try:
     from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
-# from MambaPEFT.vision.personal_lib.mmpretrain.models.peft.
 
 __all__ = [
     'vim_tiny_patch16_224', 'vim_small_patch16_224', 'vim_base_patch16_224',
@@ -367,6 +370,23 @@ class VisionMamba(nn.Module):
                 **(initializer_cfg if initializer_cfg is not None else {}),
             )
         )
+
+        # ✅ Hybrid PEFT hook (must go after model structure is defined)
+        if kwargs.get("use_peft", False):
+            set_peft(
+                self,
+                lora_out_proj=True,
+                lora_in_proj=True,
+                lora_x_proj=True,
+                lora_d=True,
+                lora_B=True,
+                lora_C=True,
+                additional_scan=True,
+                learnable_A=True,
+                learnable_D=True,
+                learnable_bias=True,
+            )
+
 
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):

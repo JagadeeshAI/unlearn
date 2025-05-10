@@ -8,7 +8,7 @@ from pathlib import Path
 import json
 import os
 
-from arch import VisionMamba
+from arch_with_hybrid_peft import VisionMamba
 from config import Config
 
 def load_model():

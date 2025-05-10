@@ -13,16 +13,16 @@ class Config:
 
     class FORGET:
         OUT_DIR = "./results/unlearned"
-        BATCH_SIZE = 64  # As per ImageNet training batch size
-        EPOCHS = 300       # Matches ImageNet training schedule
-        LR = 1e-3          # Initial learning rate for ImageNet classification
-        WEIGHT_DECAY = 0.05  # Matches paper for classification
+        BATCH_SIZE = 8 
+        EPOCHS = 300       
+        LR = 1e-3         
+        WEIGHT_DECAY = 0.05  
         BND = math.log(1000) 
         BETA = 0.15
         ALPHA = 0.001
         WARMUP_EPOCHS = 10
         LORA_RANK = 8
-        CLASS_TO_FORGET = ["n02120505"]  # Example class
+        CLASS_TO_FORGET = [60]  # Example class
         NUM_LABELS = 1000
 
         @staticmethod

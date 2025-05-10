@@ -1,5 +1,11 @@
 # src/data.py
 
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.info("Message")
+
+
 import os
 import json
 from PIL import Image, UnidentifiedImageError

@@ -18,18 +18,23 @@ def index_split(split_name, split_path, forget_class, synset_to_idx, synset_to_n
     index = []
     print(f"📂 Indexing {split_name} set...")
 
+    # Create numeric label to synset map
+    idx_to_synset = {v: k for k, v in synset_to_idx.items()}
+
     for class_name in sorted(os.listdir(split_path)):
         class_dir = os.path.join(split_path, class_name)
         if not os.path.isdir(class_dir):
             continue
 
-        if class_name not in synset_to_idx:
-            print(f"⚠️ Skipping unknown synset: {class_name}")
+        try:
+            label = int(class_name)
+            synset = idx_to_synset[label]
+        except (ValueError, KeyError):
+            print(f"⚠️ Skipping unknown or invalid class: {class_name}")
             continue
 
-        label = synset_to_idx[class_name]
-        label_name = synset_to_name[class_name]
-        tag = "forget" if class_name == forget_class else "retain"
+        label_name = synset_to_name[synset]
+        tag = "forget" if label == forget_class else "retain"
 
         image_files = [f for f in os.listdir(class_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
         for img_name in tqdm(image_files, desc=f"{split_name}/{class_name}", leave=False):
@@ -38,12 +43,13 @@ def index_split(split_name, split_path, forget_class, synset_to_idx, synset_to_n
                 "path": img_path,
                 "label": label,
                 "label_name": label_name,
-                "class": class_name,
+                "class": synset,
                 "tag": tag
             })
 
     print(f"✅ Indexed {split_name}: {len(index)} samples.")
     return index
+
 
 def main():
     data_dir = Config.DATA_DIR

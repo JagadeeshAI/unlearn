@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import sys
 import os
+import argparse
 from huggingface_hub import hf_hub_download
 
 # Add the Vim repo to the path
@@ -20,17 +21,17 @@ class VimTinyClassifier(nn.Module):
         self.model = vim_tiny_patch16_224_bimambav2_final_pool_mean_abs_pos_embed_with_midclstok_div2(pretrained=False)
         self.model.head = nn.Linear(self.model.head.in_features, num_classes)
 
-    def forward(self, pixel_values):
-        return self.model(pixel_values)
+    def forward(self, x):
+        return self.model(x)
 
     def load_pretrained(self):
         print("📦 Downloading Vim-Tiny pretrained weights from Hugging Face...")
         weight_path = hf_hub_download("hustvl/Vim-tiny-midclstok", "vim_t_midclstok_76p1acc.pth")
-        state_dict = torch.load(weight_path, map_location="cpu")
-        
-        incompatible = self.load_state_dict(state_dict, strict=False)
+
+        # Safe loading for PyTorch 2.6+ with argparse.Namespace
+        with torch.serialization.safe_globals([argparse.Namespace]):
+            state_dict = torch.load(weight_path, map_location="cpu")
+
+        incompatible = self.load_state_dict(state_dict.get("model", state_dict), strict=False)
         print("✅ Pretrained weights loaded.")
-        if incompatible.missing_keys:
-            print("⚠️ Missing keys:", incompatible.missing_keys)
-        if incompatible.unexpected_keys:
-            print("⚠️ Unexpected keys:", incompatible.unexpected_keys)
+        

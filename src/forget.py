@@ -1,55 +1,29 @@
-# forget.py
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 import os
+import json
+import torch
 import logging
+from pathlib import Path
+import torch.nn.functional as F
 from tqdm import tqdm
 from itertools import cycle
-from pathlib import PurePath
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
+from arch import VisionMamba
+from config import Config
+from src.data import prepare_data_loaders
+
+# Silence unnecessary logging
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 from transformers import logging as hf_logging
 hf_logging.set_verbosity_error()
 
-import torch
-import torch.nn.functional as F
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from huggingface_hub import snapshot_download
-
-from config import Config
-from src.data import prepare_data_loaders
-from src.vim import VimTinyClassifier
-from VimOffical.vim.models_mamba import VisionMamba
-
-def retention_loss(logits, labels):
-    return F.cross_entropy(logits, labels)
-
-def forgetting_loss(logits, labels):
-    ce = F.cross_entropy(logits, labels)
-    return F.relu(Config.FORGET.BND - ce)
-
-def evaluate(model, loader, device):
-    model.eval()
-    correct = total = 0
-    with torch.no_grad():
-        for images, labels in loader:
-            images, labels = images.to(device), labels.to(device)
-            logits = model(pixel_values=images)
-            preds = logits.argmax(dim=-1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-    return 100 * correct / total
-
 def load_model():
-    VIM_REPO = "hustvl/Vim-small-midclstok"
-    pretrained_dir = snapshot_download(
-        repo_id=VIM_REPO,
-        local_files_only=True,
-        resume_download=True,
-    )
-
-    ckpt_path = PurePath(pretrained_dir, "vim_s_midclstok_ft_81p6acc.pth")
+    ckpt_path = Path("results/unlearned/recent.pth")
 
     model = VisionMamba(
         patch_size=16,
@@ -74,24 +48,38 @@ def load_model():
         img_size=224,
     )
 
-    checkpoint = torch.load(str(ckpt_path), map_location="cpu")
-    model.load_state_dict(checkpoint["model"], strict=True)
+    checkpoint = torch.load(str(ckpt_path), map_location="cpu")  # <-- FIXED HERE
+    model.load_state_dict(checkpoint, strict=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = Config.DEVICE
     model.to(device).eval()
     return model, device
+
+def retention_loss(logits, labels):
+    return F.cross_entropy(logits, labels)
+
+def forgetting_loss(logits, labels):
+    ce = F.cross_entropy(logits, labels)
+    return F.relu(Config.FORGET.BND - ce)
+
+def evaluate(model, loader, device):
+    model.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for images, labels in loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            preds = outputs.argmax(dim=-1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    return 100 * correct / total
 
 def train_forget():
     print(f"📟 Device: {Config.DEVICE}")
     os.makedirs(Config.FORGET.OUT_DIR, exist_ok=True)
 
-    print("🧠 Initializing Vim-Tiny classifier...")
-    model = VimTinyClassifier(num_classes=Config.FORGET.NUM_LABELS)
-    model.load_pretrained()
-    model.to(Config.DEVICE)
-
-    optimizer = AdamW(model.parameters(), lr=Config.FORGET.LR, weight_decay=Config.FORGET.WEIGHT_DECAY)
-    scheduler = CosineAnnealingLR(optimizer, T_max=Config.FORGET.EPOCHS)
+    print("🧠 Loading VisionMamba model...")
+    model, device = load_model()
 
     data = prepare_data_loaders(Config.DATA_DIR, image_size=(224, 224), num_workers=4)
     loader_r = data['forgetting']['train']['retain']
@@ -100,6 +88,8 @@ def train_forget():
     val_f = data['forgetting']['val']['forget']
 
     print("🚀 Starting forgetting fine-tuning…")
+    optimizer = AdamW(model.parameters(), lr=Config.FORGET.LR, weight_decay=Config.FORGET.WEIGHT_DECAY)
+    scheduler = CosineAnnealingLR(optimizer, T_max=Config.FORGET.EPOCHS)
 
     global_step = 0
     for epoch in range(1, Config.FORGET.EPOCHS + 1):
@@ -111,13 +101,13 @@ def train_forget():
 
         for xr, yr in loop:
             xf, yf = next(forget_cycle)
-            xr, yr = xr.to(Config.DEVICE), yr.to(Config.DEVICE)
-            xf, yf = xf.to(Config.DEVICE), yf.to(Config.DEVICE)
+            xr, yr = xr.to(device), yr.to(device)
+            xf, yf = xf.to(device), yf.to(device)
 
-            logits_r = model(pixel_values=xr)
+            logits_r = model(xr)
             loss_r = retention_loss(logits_r, yr)
 
-            logits_f = model(pixel_values=xf)
+            logits_f = model(xf)
             loss_f = forgetting_loss(logits_f, yf)
 
             loss = loss_r + Config.FORGET.BETA * loss_f
@@ -136,18 +126,18 @@ def train_forget():
                 "For": f"{loss_f:.4f}"
             })
 
-            if global_step % 5000 == 0:
-                ckpt_path = os.path.join(Config.FORGET.OUT_DIR, f"checkpoint_ep{epoch}_step{global_step}.pth")
-                torch.save(model.state_dict(), ckpt_path)
-                print(f"💾 Saved intermediate checkpoint: {ckpt_path}")
-
         scheduler.step()
         print(f"📊 Epoch {epoch:2d} — Avg Ret={sum_ret/steps:.4f}  Avg For={sum_for/steps:.4f}")
 
+        # 🔐 Save checkpoint for this epoch
+        checkpoint_path = os.path.join(Config.FORGET.OUT_DIR, f"recent.pth")
+        torch.save(model.state_dict(), checkpoint_path)
+        print(f"💾 Saved model checkpoint to {checkpoint_path}")
+
     print("✅ Forgetting complete!")
 
-    acc_f = evaluate(model, val_f, Config.DEVICE)
-    acc_r = evaluate(model, val_r, Config.DEVICE)
+    acc_f = evaluate(model, val_f, device)
+    acc_r = evaluate(model, val_r, device)
     print(f"\n🎯 Forgotten Accuracy: {acc_f:.2f}%")
     print(f"🎯 Retained Accuracy: {acc_r:.2f}%")
 
@@ -155,6 +145,15 @@ def train_forget():
     torch.save(model.state_dict(), final_path)
     print(f"💾 Final model saved to {final_path}")
 
+    # Save metrics
+    results = {
+        "forgotten_accuracy": acc_f,
+        "retained_accuracy": acc_r
+    }
+    result_path = os.path.join(Config.FORGET.OUT_DIR, "forgetting_results.json")
+    with open(result_path, "w") as f:
+        json.dump(results, f, indent=4)
+    print(f"📁 Results saved to {result_path}")
 
 if __name__ == "__main__":
     train_forget()

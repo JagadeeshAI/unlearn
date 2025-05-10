@@ -373,19 +373,44 @@ class VisionMamba(nn.Module):
 
         # ✅ Hybrid PEFT hook (must go after model structure is defined)
         if kwargs.get("use_peft", False):
+            print("🔁 Enabling PEFT hooks...")
+
+            # 🔒 Freeze all base layers
+            for param in self.parameters():
+                param.requires_grad = False
+
+            # 🔁 Apply PEFT hooks dynamically
+            # ❌ Incorrect: These aren't valid args in your version of set_peft
+            # set_peft(self, use_peft=True, rank=96, alpha=0.1)
+
+            # ✅ Corrected: Use correct keys your function accepts
             set_peft(
                 self,
-                lora_out_proj=True,
-                lora_in_proj=True,
-                lora_x_proj=True,
-                lora_d=True,
-                lora_B=True,
-                lora_C=True,
-                additional_scan=True,
-                learnable_A=True,
-                learnable_D=True,
-                learnable_bias=True,
+                lora_out_proj=kwargs.get("lora_out_proj", True),
+                dim=kwargs.get("dim", 96),
+                s=kwargs.get("s", 0.1),
+                bit=kwargs.get("bit", 32),  # optional or default
+                # Add more flags here if needed, based on config
+                lora_in_proj=kwargs.get("lora_in_proj", False),
+                lora_x_proj=kwargs.get("lora_x_proj", False),
+                lora_d=kwargs.get("lora_d", False),
+                lora_B=kwargs.get("lora_B", False),
+                lora_C=kwargs.get("lora_C", False),
+                additional_scan=kwargs.get("additional_scan", False),
+                learnable_A=kwargs.get("learnable_A", False),
+                learnable_A_v2=True,
+                learnable_D=kwargs.get("learnable_D", False),
+                learnable_D_v2=True,
+                learnable_bias=kwargs.get("learnable_bias", False),
+                learnable_bias_v2=True,
             )
+
+
+            # ✅ Verify which LoRA params are trainable
+            for name, param in self.named_parameters():
+                if "lora" in name.lower() and param.requires_grad:
+                    print(f"✅ LoRA param: {name}, requires_grad: {param.requires_grad}")
+
 
 
 

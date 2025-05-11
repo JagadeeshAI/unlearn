@@ -24,7 +24,8 @@ class Config:
         LORA_RANK = 8
         CLASS_TO_FORGET = [11]  # Example class
         NUM_LABELS = 10
-        RESUME=True
+        CLASS_LABLES_TOP_10=[102,11,129,13,139,148,169,225,258,275]
+        RESUME=False
         @staticmethod
         def model_path():
             return os.path.join(Config.FORGET.OUT_DIR, "after_forgetting.pth")

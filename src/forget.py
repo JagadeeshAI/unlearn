@@ -11,12 +11,12 @@ from tqdm import tqdm
 from itertools import cycle
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from pathlib import Path, PurePath
 
 from arch2 import VisionMamba
 from config import Config
 from src.data import prepare_data_loaders
 from huggingface_hub import snapshot_download
-from pathlib import Path, PurePath
 
 # Silence unnecessary logging
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -38,16 +38,18 @@ def print_lora_stats(model):
     print(f"🔹 LoRA Parameters Only: {lora_params:,} ({percent_lora:.6f}%)")
 
 def load_model():
-    VIM_REPO = "hustvl/Vim-small-midclstok"
-    pretrained_dir = snapshot_download(
-        repo_id=VIM_REPO,
-        local_files_only=True,
-        resume_download=True,
-    )
+    if Config.FORGET.RESUME:
+        ckpt_path = "results/unlearned/recent.pth"
+    else:  
+        VIM_REPO = "hustvl/Vim-small-midclstok"
+        pretrained_dir = snapshot_download(
+            repo_id=VIM_REPO,
+            local_files_only=True,
+            resume_download=True,
+        )
+        ckpt_path = PurePath(pretrained_dir, "vim_s_midclstok_ft_81p6acc.pth")
 
-    ckpt_path = "results/unlearned/recent.pth"
-    checkpoint = torch.load(ckpt_path, map_location="cpu" ,weights_only=False)
-
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
     state_dict = checkpoint.get("model", checkpoint)
 
     model = VisionMamba(
@@ -71,28 +73,39 @@ def load_model():
         drop_path_rate=0.1,
         drop_block_rate=None,
         img_size=224,
-        # lora_out_proj=True,
-        # lora_r=96,
-        # lora_alpha=0.1
+        lora_out_proj=True,
+        lora_r=96,
+        lora_alpha=0.1
     )
 
-    # Remap classifier weights for LoRA
-    # new_state_dict = model.state_dict()
-    # new_state_dict["head.base.weight"] = state_dict["head.weight"]
-    # new_state_dict["head.base.bias"] = state_dict["head.bias"]
+    # 🔒 Freeze all params
+    for param in model.parameters():
+        param.requires_grad = False
+    # ✅ Enable only LoRA layers
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            param.requires_grad = True
 
-    # for k, v in state_dict.items():
-    #     if k not in ["head.weight", "head.bias"]:
-    #         new_state_dict[k] = v
+    # 🧠 Handle both LoRA and Hugging Face formats
+    if "head.base.weight" in state_dict:
+        # Already LoRA format
+        model.load_state_dict(state_dict, strict=True)
+    elif "head.weight" in state_dict:
+        # Hugging Face format, needs remapping
+        print("🔁 Remapping Hugging Face weights for LoRA structure...")
+        new_state_dict = model.state_dict()
+        new_state_dict["head.base.weight"] = state_dict["head.weight"]
+        new_state_dict["head.base.bias"] = state_dict["head.bias"]
+        for k, v in state_dict.items():
+            if k not in ["head.weight", "head.bias"]:
+                new_state_dict[k] = v
+        model.load_state_dict(new_state_dict, strict=False)
+    else:
+        raise ValueError("❌ Unknown checkpoint structure")
 
-    # model.load_state_dict(new_state_dict, strict=False)
-
-    # Print LoRA stats
     print_lora_stats(model)
-
-    device = Config.DEVICE
-    model.to(device).eval()
-    return model, device
+    model.to(Config.DEVICE).eval()
+    return model, Config.DEVICE
 
 def retention_loss(logits, labels):
     return F.cross_entropy(logits, labels)
@@ -119,8 +132,6 @@ def train_forget():
 
     print("🧠 Loading VisionMamba model...")
     model, device = load_model()
-
-    # ✅ Print parameter stats with LoRA
     print_lora_stats(model)
 
     data = prepare_data_loaders(Config.DATA_DIR, image_size=(224, 224), num_workers=4)
@@ -171,6 +182,12 @@ def train_forget():
         scheduler.step()
         print(f"📊 Epoch {epoch:2d} — Avg Ret={sum_ret/steps:.4f}  Avg For={sum_for/steps:.4f}")
 
+        # 🔍 Validation after epoch
+        acc_f = evaluate(model, val_f, device)
+        acc_r = evaluate(model, val_r, device)
+        print(f"🧪 Epoch {epoch} Validation — Forgotten Accuracy: {acc_f:.2f}% | Retained Accuracy: {acc_r:.2f}%")
+
+        # 💾 Save checkpoint
         checkpoint_path = os.path.join(Config.FORGET.OUT_DIR, f"recent.pth")
         torch.save(model.state_dict(), checkpoint_path)
         print(f"💾 Saved model checkpoint to {checkpoint_path}")
@@ -179,8 +196,8 @@ def train_forget():
 
     acc_f = evaluate(model, val_f, device)
     acc_r = evaluate(model, val_r, device)
-    print(f"\n🎯 Forgotten Accuracy: {acc_f:.2f}%")
-    print(f"🎯 Retained Accuracy: {acc_r:.2f}%")
+    print(f"\n🎯 Final Forgotten Accuracy: {acc_f:.2f}%")
+    print(f"🎯 Final Retained Accuracy: {acc_r:.2f}%")
 
     final_path = Config.FORGET.model_path()
     torch.save(model.state_dict(), final_path)

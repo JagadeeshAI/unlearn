@@ -28,16 +28,18 @@ def print_trainable_lora_stats(model):
 
 
 def load_model():
-    VIM_REPO = "hustvl/Vim-small-midclstok"
-    pretrained_dir = snapshot_download(
-        repo_id=VIM_REPO,
-        local_files_only=True,
-        resume_download=True,
-    )
+    if Config.FORGET.RESUME:
+        ckpt_path = "results/unlearned/recent.pth"
+    else:
+        VIM_REPO = "hustvl/Vim-small-midclstok"
+        pretrained_dir = snapshot_download(
+            repo_id=VIM_REPO,
+            local_files_only=True,
+            resume_download=True,
+        )
+        ckpt_path = PurePath(pretrained_dir, "vim_s_midclstok_ft_81p6acc.pth")
 
-    ckpt_path = PurePath(pretrained_dir, "vim_s_midclstok_ft_81p6acc.pth")
-    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
     state_dict = checkpoint.get("model", checkpoint)
 
     model = VisionMamba(
@@ -66,16 +68,29 @@ def load_model():
         lora_alpha=0.1
     )
 
-    # Remap classifier weights for LoRA
-    new_state_dict = model.state_dict()
-    new_state_dict["head.base.weight"] = state_dict["head.weight"]
-    new_state_dict["head.base.bias"] = state_dict["head.bias"]
+    # 🔒 Freeze everything first
+    for p in model.parameters():
+        p.requires_grad = False
+    # ✅ Unfreeze LoRA
+    for name, p in model.named_parameters():
+        if "lora_" in name:
+            p.requires_grad = True
 
-    for k, v in state_dict.items():
-        if k not in ["head.weight", "head.bias"]:
-            new_state_dict[k] = v
-
-    model.load_state_dict(new_state_dict, strict=False)
+    # 🧠 Load LoRA-style weights
+    if "head.base.weight" in state_dict:
+        model.load_state_dict(state_dict, strict=True)
+    elif "head.weight" in state_dict:
+        # Remap Hugging Face weights to LoRA structure
+        print("🔁 Remapping Hugging Face weights to LoRA-compatible model...")
+        new_state_dict = model.state_dict()
+        new_state_dict["head.base.weight"] = state_dict["head.weight"]
+        new_state_dict["head.base.bias"] = state_dict["head.bias"]
+        for k, v in state_dict.items():
+            if k not in ["head.weight", "head.bias"]:
+                new_state_dict[k] = v
+        model.load_state_dict(new_state_dict, strict=False)
+    else:
+        raise ValueError("Checkpoint format not recognized")
 
     print_trainable_lora_stats(model)
 
@@ -131,12 +146,10 @@ def validate(model, device, dataloader):
         }
     }
 
-    # Load label names
     with open("data/imagenet_class_index.json") as f:
         idx_to_label = json.load(f)
         idx_to_name = {int(k): v[1] for k, v in idx_to_label.items()}
 
-    # Sort top 10
     sorted_classes = sorted(
         results["class_accuracy"].items(),
         key=lambda item: item[1],
@@ -151,7 +164,6 @@ def validate(model, device, dataloader):
         cls_name = idx_to_name.get(cls_id, "Unknown")
         print(f"{i:<5} {cls_id:<6} {cls_name:<30} {acc:>12.2f}")
 
-    # Save results
     os.makedirs(Config.FORGET.OUT_DIR, exist_ok=True)
     out_path = os.path.join(Config.FORGET.OUT_DIR, "validation_scores.json")
     with open(out_path, "w") as f:

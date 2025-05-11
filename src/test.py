@@ -36,7 +36,7 @@ def load_model():
     )
 
     ckpt_path = PurePath(pretrained_dir, "vim_s_midclstok_ft_81p6acc.pth")
-    checkpoint = torch.load(ckpt_path, map_location="cpu" ,weights_only=False)
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
     state_dict = checkpoint.get("model", checkpoint)
 
@@ -77,7 +77,6 @@ def load_model():
 
     model.load_state_dict(new_state_dict, strict=False)
 
-    # Print LoRA stats
     print_trainable_lora_stats(model)
 
     device = Config.DEVICE
@@ -132,6 +131,27 @@ def validate(model, device, dataloader):
         }
     }
 
+    # Load label names
+    with open("data/imagenet_class_index.json") as f:
+        idx_to_label = json.load(f)
+        idx_to_name = {int(k): v[1] for k, v in idx_to_label.items()}
+
+    # Sort top 10
+    sorted_classes = sorted(
+        results["class_accuracy"].items(),
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    print("\n🏆 Top 10 Classes by Accuracy:")
+    print(f"{'Rank':<5} {'Label':<6} {'Name':<30} {'Accuracy (%)':>12}")
+    print("-" * 60)
+    for i, (cls_str, acc) in enumerate(sorted_classes[:10], 1):
+        cls_id = int(cls_str)
+        cls_name = idx_to_name.get(cls_id, "Unknown")
+        print(f"{i:<5} {cls_id:<6} {cls_name:<30} {acc:>12.2f}")
+
+    # Save results
     os.makedirs(Config.FORGET.OUT_DIR, exist_ok=True)
     out_path = os.path.join(Config.FORGET.OUT_DIR, "validation_scores.json")
     with open(out_path, "w") as f:

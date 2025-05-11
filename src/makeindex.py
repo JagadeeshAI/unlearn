@@ -10,16 +10,14 @@ def load_synset_to_label_map(json_path="imagenet_class_index.json"):
 
     synset_to_idx = {v[0]: int(k) for k, v in idx_to_data.items()}
     synset_to_name = {v[0]: v[1] for k, v in idx_to_data.items()}
+    idx_to_synset = {int(k): v[0] for k, v in idx_to_data.items()}
 
     print(f"✅ Loaded {len(synset_to_idx)} synsets from imagenet_class_index.json")
-    return synset_to_idx, synset_to_name
+    return synset_to_idx, synset_to_name, idx_to_synset
 
-def index_split(split_name, split_path, forget_class, synset_to_idx, synset_to_name):
+def index_split(split_name, split_path, forget_class, synset_to_name, idx_to_synset):
     index = []
     print(f"📂 Indexing {split_name} set...")
-
-    # Create numeric label to synset map
-    idx_to_synset = {v: k for k, v in synset_to_idx.items()}
 
     for class_name in sorted(os.listdir(split_path)):
         class_dir = os.path.join(split_path, class_name)
@@ -27,7 +25,7 @@ def index_split(split_name, split_path, forget_class, synset_to_idx, synset_to_n
             continue
 
         try:
-            label = int(class_name)
+            label = int(class_name)  # Folder name is now the numeric label
             synset = idx_to_synset[label]
         except (ValueError, KeyError):
             print(f"⚠️ Skipping unknown or invalid class: {class_name}")
@@ -50,21 +48,20 @@ def index_split(split_name, split_path, forget_class, synset_to_idx, synset_to_n
     print(f"✅ Indexed {split_name}: {len(index)} samples.")
     return index
 
-
 def main():
     data_dir = Config.DATA_DIR
     forget_class = Config.FORGET.CLASS_TO_FORGET[0]
     output_dir = os.path.join(data_dir, "index")
     os.makedirs(output_dir, exist_ok=True)
 
-    synset_to_idx, synset_to_name = load_synset_to_label_map("data/imagenet_class_index.json")
+    synset_to_idx, synset_to_name, idx_to_synset = load_synset_to_label_map("data/imagenet_class_index.json")
 
     for split in ["train", "val"]:
         split_path = os.path.join(data_dir, split)
         out_path = os.path.join(output_dir, f"{split}.jsonl")
 
-        index = index_split(split, split_path, forget_class, synset_to_idx, synset_to_name)
-        with open(out_path, "w") as f:
+        index = index_split(split, split_path, forget_class, synset_to_name, idx_to_synset)
+        with open(out_path, "w", encoding="utf-8") as f:
             for item in index:
                 f.write(json.dumps(item) + "\n")
 

@@ -45,7 +45,7 @@ def load_model():
         resume_download=True,
     )
 
-    ckpt_path = PurePath(pretrained_dir, "vim_s_midclstok_ft_81p6acc.pth")
+    ckpt_path = "results/unlearned/recent.pth"
     checkpoint = torch.load(ckpt_path, map_location="cpu" ,weights_only=False)
 
     state_dict = checkpoint.get("model", checkpoint)
@@ -71,21 +71,21 @@ def load_model():
         drop_path_rate=0.1,
         drop_block_rate=None,
         img_size=224,
-        lora_out_proj=True,
-        lora_r=96,
-        lora_alpha=0.1
+        # lora_out_proj=True,
+        # lora_r=96,
+        # lora_alpha=0.1
     )
 
     # Remap classifier weights for LoRA
-    new_state_dict = model.state_dict()
-    new_state_dict["head.base.weight"] = state_dict["head.weight"]
-    new_state_dict["head.base.bias"] = state_dict["head.bias"]
+    # new_state_dict = model.state_dict()
+    # new_state_dict["head.base.weight"] = state_dict["head.weight"]
+    # new_state_dict["head.base.bias"] = state_dict["head.bias"]
 
-    for k, v in state_dict.items():
-        if k not in ["head.weight", "head.bias"]:
-            new_state_dict[k] = v
+    # for k, v in state_dict.items():
+    #     if k not in ["head.weight", "head.bias"]:
+    #         new_state_dict[k] = v
 
-    model.load_state_dict(new_state_dict, strict=False)
+    # model.load_state_dict(new_state_dict, strict=False)
 
     # Print LoRA stats
     print_lora_stats(model)
